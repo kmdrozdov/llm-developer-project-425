@@ -5,9 +5,10 @@
 
 | secret_id | variable_name |
 |--|--|
-| ydb-endpoint | YDB_ENDPOINT |
-| ydb-database | YDB_DATABASE |
-| ai-studio-api-key | AI_STUDIO_API_KEY |
+| ydb-endpoint | Эндпоинт для подключения к БД |
+| ydb-database | Путь до БД |
+| ai-studio-api-key | Ключ AI Studio |
+| email-credentials | Ключ для работы IMAP/SMTP |
 
 ### Роли для Service Account
 
