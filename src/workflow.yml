@@ -1,0 +1,79 @@
+yawl: '0.2'
+defaultRetryPolicy:
+  errorList:
+    - STEP_TIMEOUT
+    - STEP_QUOTA_EXCEEDED
+    - YDB_CALL_SERVICE_UNAVAILABLE
+    - HTTP_CALL_429
+    - HTTP_CALL_500
+    - HTTP_CALL_502
+    - HTTP_CALL_503
+    - HTTP_CALL_504
+  errorListMode: INCLUDE
+  retryCount: 5
+  initialDelay: 2s
+  backoffRate: 2
+  maxDelay: 30s
+start: get_old_tickets
+steps:
+  get_old_tickets:
+    databaseQuery:
+      connection:
+        type: YDB
+        host: ydb.serverless.yandexcloud.net
+        port: 2135
+        database: /ru-central1/b1gsve9ikc18b9kmftcd/etn3l00u8vf9ktctkcl9
+        ssl: true
+        iam: true
+      query: >-
+        SELECT * FROM tickets WHERE status = 'open' AND created_at <
+        CurrentUtcTimestamp() - Interval('PT24H');
+      mode: QUERY
+      output: '\({ tickets: .ResultSets[0] })'
+      next: check_old_tickets
+  check_old_tickets:
+    switch:
+      choices:
+        - condition: (.tickets | length) > 0
+          next: analyze_old_tickets
+      default:
+        next: done
+  analyze_old_tickets:
+    aiStudioAgent:
+      promptTemplateId: fvtm771lj46t5qqbv852
+      message: 'Составь дайджест по этим тикетам: \(.tickets | tostring)'
+      output: '\({ agent_response: .Result })'
+      next: update_old_tickets
+  update_old_tickets:
+    databaseQuery:
+      connection:
+        type: YDB
+        host: ydb.serverless.yandexcloud.net
+        port: 2135
+        database: /ru-central1/b1gsve9ikc18b9kmftcd/etn3l00u8vf9ktctkcl9
+        ssl: true
+        iam: true
+      query: >-
+        UPDATE tickets SET status = 'escalated', updated_at =
+        CurrentUtcTimestamp() WHERE status = 'open' AND created_at <
+        CurrentUtcTimestamp() - Interval('PT10H');
+      mode: QUERY
+      next: send_mail_to_operator
+  send_mail_to_operator:
+    httpCall:
+      url: https://functions.yandexcloud.net/d4e0rdf03l654u9ih5ee
+      method: POST
+      body: |-
+        \({
+          to: lockboxPayload("e6q4d4h5guk1ps0geqk4"; "value"),
+          subject: "Новые тикеты",
+          body: .agent_response
+        })
+      headers:
+        Content-Type: application/json
+      useServiceAccount: true
+      output: \(. | fromjson)
+      next: done
+    description: ''
+  done:
+    success: {}
