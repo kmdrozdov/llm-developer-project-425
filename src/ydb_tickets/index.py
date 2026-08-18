@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -9,6 +10,12 @@ import ydb.iam
 
 YDB_ENDPOINT = os.getenv("YDB_ENDPOINT")
 YDB_DATABASE = os.getenv("YDB_DATABASE")
+
+_EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
+_PHONE_RE = re.compile(
+    r"(?:\+7|8)[\s\-]?(?:\(?\d{3}\)?[\s\-]?)?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}"
+)
+_CARD_RE = re.compile(r"\b(?:\d[ \-]?){13,19}\b")
 
 if not YDB_ENDPOINT or not YDB_DATABASE:
     raise RuntimeError("Missing YDB_ENDPOINT or YDB_DATABASE in environment variables")
@@ -37,12 +44,63 @@ def _iso(value: Any) -> str:
         return value.isoformat()
     return str(value)
 
+def _luhn_ok(digits: str) -> bool:
+    total, alt = 0, False
+    for ch in reversed(digits):
+        n = int(ch)
+        if alt:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+        alt = not alt
+    return total % 10 == 0
+
+def mask_pii(text: str) -> str:
+    if not text:
+        return text
+
+    def email(m):
+        local, _, domain = m.group(0).partition("@")
+        return f"{local[:1]}***@{domain[:1]}***"
+
+    def phone(m):
+        digits = re.sub(r"\D", "", m.group(0))
+        if len(digits) < 10:
+            return m.group(0)
+        return "*" * (len(digits) - 2) + digits[-2:]  # для оператора
+
+    def card(m):
+        raw = m.group(0)
+        digits = re.sub(r"\D", "", raw)
+        if not (13 <= len(digits) <= 19) or not _luhn_ok(digits):
+            return raw  # не маскировать UUID/случайные цифры
+        return "*" * (len(digits) - 4) + digits[-4:]
+
+    text = _EMAIL_RE.sub(email, text)
+    text = _CARD_RE.sub(card, text)
+    text = _PHONE_RE.sub(phone, text)
+    return text
+
+def _safe_log(action: str, params: Dict[str, Any]) -> None:
+    """В логи — только метаданные, без сырого text/email."""
+    text = params.get("text") or ""
+    user_id = params.get("user_id") or ""
+    print(
+        f"action={action} "
+        f"keys={sorted(params.keys())} "
+        f"text_len={len(text)} "
+        f"category={params.get('category')} "
+        f"has_ticket_id={'ticket_id' in params} "
+        f"user_id={mask_pii(user_id)}"
+    )
 
 def create_ticket(user_id: str, category: str, text: str) -> Dict[str, Any]:
     ticket_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
     created_at = _now()
-
+    text = mask_pii(text)
+    
     yql_ticket = """
         DECLARE $id AS Utf8;
         DECLARE $user_id AS Utf8;
@@ -132,6 +190,7 @@ def append_message(ticket_id: str, user_id: str, text: str, role: str) -> Dict[s
     _ = user_id
     message_id = str(uuid.uuid4())
     created_at = _now()
+    text = mask_pii(text)
 
     yql = """
         DECLARE $id AS Utf8;
@@ -186,7 +245,7 @@ def normalize_event(event: Any) -> Dict[str, Any]:
     3) MCP Hub: аргументы инструмента напрямую (диспетчеризация по ключам)
     """
     if not isinstance(event, dict):
-        raise ValueError(f"Expected dict event, got {type(event).__name__}: {event!r}")
+        raise ValueError(f"Expected dict event, got {type(event).__name__}: {list(event)}")
 
     if "action" in event:
         action = event["action"]
@@ -229,6 +288,8 @@ def handle_request(event: Any, *, as_http: bool = False) -> Any:
         action = normalized["action"]
         params = normalized["params"]
 
+        _safe_log(action, params)
+
         if action == "create-ticket":
             user_id = params.get("user_id")
             category = params.get("category")
@@ -262,12 +323,11 @@ def handle_request(event: Any, *, as_http: bool = False) -> Any:
         return _http_response(200, result) if as_http else result
 
     except Exception as e:
-        print(f"ERROR: {e}")
-        error = {"error": str(e)}
+        print(f"ERROR type={type(e).__name__}")
+        error = {"error": "internal error"}
         return _http_response(500, error) if as_http else error
 
 
 def handle(event, context=None):
-    print(f"RAW EVENT: {event!r}")
     as_http = isinstance(event, dict) and "httpMethod" in event
     return handle_request(event, as_http=as_http)

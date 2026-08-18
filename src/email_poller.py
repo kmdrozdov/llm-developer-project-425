@@ -170,8 +170,6 @@ MCP (только tool call, не пиши вызов в письме):
       }]
     )
 
-    print(response)
-
     return response.output_text
 
 
@@ -217,8 +215,7 @@ def handler(event, context):
         imap.login(IMAP_USER, IMAP_PASSWORD)
         imap.select("INBOX")
     except Exception as e:  
-        error_msg = f"Ошибка авторизации/подключения к IMAP: {e}, IMAP_USER: {IMAP_USER}, IMAP_PASSWORD: {IMAP_PASSWORD}"
-        print(error_msg)
+        error_msg = f"Ошибка авторизации/подключения к IMAP: {e}"
         return {"statusCode": 500, "body": error_msg}
 
     try:
@@ -251,8 +248,6 @@ def handler(event, context):
                     _imap_mark_seen(imap, num)
                     continue
 
-                print(f"MSG num={num.decode()} from={from_email} subject={subject_header}")
-
                 # Чтение контента
                 body_text = get_email_body(msg)
                 
@@ -261,14 +256,14 @@ def handler(event, context):
                 print(f"AGENT_OK len={len(api_response_text)}")
                 
                 send_reply(from_email, subject_header, api_response_text)
-                print(f"SEND_OK to={from_email}")
+                print(f"SEND_OK")
 
                 # Успешное завершение шага — маркируем
                 _imap_mark_seen(imap, num)
 
             except Exception as mail_err:
                 # В случае любой ошибки (API недоступно, SMTP упал) обязательно маркируем \Seen
-                print(f"Ошибка при обработке письма ID {num.decode()}: {mail_err}. Письмо будет пропущено.")
+                print(f"MAIL_ERR id={num.decode()} type={type(mail_err).__name__}")
                 _imap_mark_seen(imap, num)
                 continue
 
