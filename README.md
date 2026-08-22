@@ -13,3 +13,15 @@
 ### Роли для Service Account
 
 `functions.functionInvoker`, `lockbox.payloadViewer`, `ydb.editor`, `serverless.mcpGateways.invoker`, `ai.languageModels.user`
+
+### Trusted content
+
+- системный промпт / instructions / promptTemplateId;
+- конфигурация MCP (server_url, схема tools, require_approval);
+- vector_store_ids, модерация, URI модели.
+
+### Untrusted content
+
+- текст письма и From;
+- фрагменты RAG (file_search), если документы когда-либо приходят извне;
+- аргументы tool-call, которые модель собрала из письма (text, ticket_id).
