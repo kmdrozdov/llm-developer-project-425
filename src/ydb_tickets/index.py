@@ -288,6 +288,81 @@ def append_message(ticket_id: str, user_id: str, text: str, role: str) -> Dict[s
     return {"message_id": message_id, "ok": True}
 
 
+def _latest_agent_message_id(ticket_id: str) -> Optional[str]:
+    yql = """
+        DECLARE $ticket_id AS Utf8;
+
+        SELECT id
+        FROM messages
+        WHERE ticket_id = $ticket_id AND role = 'agent'
+        ORDER BY created_at DESC
+        LIMIT 1;
+    """
+
+    def callee(session):
+        prepared = session.prepare(yql)
+        result_sets = session.transaction().execute(
+            prepared,
+            {"$ticket_id": ticket_id},
+            commit_tx=True,
+        )
+        rows = result_sets[0].rows
+        return rows[0].id if rows else None
+
+    return session_pool.retry_operation_sync(callee)
+
+
+def record_usage(
+    ticket_id: str,
+    message_id: Optional[str],
+    tokens_in: Optional[int],
+    tokens_out: Optional[int],
+    latency_ms: Optional[int],
+    model: Optional[str],
+) -> Dict[str, Any]:
+    if tokens_in is None or tokens_out is None:
+        return {"ok": False, "reason": "no usage"}
+
+    if not message_id:
+        message_id = _latest_agent_message_id(ticket_id)
+    if not message_id:
+        return {"ok": False, "reason": "no agent message"}
+
+    yql = """
+        DECLARE $ticket_id AS Utf8;
+        DECLARE $id AS Utf8;
+        DECLARE $model AS Utf8;
+        DECLARE $tokens_in AS Uint64;
+        DECLARE $tokens_out AS Uint64;
+        DECLARE $latency_ms AS Uint32;
+
+        UPDATE messages
+        SET model = $model,
+            tokens_in = $tokens_in,
+            tokens_out = $tokens_out,
+            latency_ms = $latency_ms
+        WHERE ticket_id = $ticket_id AND id = $id;
+    """
+
+    def callee(session):
+        prepared = session.prepare(yql)
+        session.transaction().execute(
+            prepared,
+            {
+                "$ticket_id": ticket_id,
+                "$id": message_id,
+                "$model": model or "",
+                "$tokens_in": int(tokens_in),
+                "$tokens_out": int(tokens_out),
+                "$latency_ms": int(latency_ms or 0),
+            },
+            commit_tx=True,
+        )
+
+    session_pool.retry_operation_sync(callee)
+    return {"ok": True, "message_id": message_id}
+
+
 def detect_tool_from_keys(params: Dict[str, Any]) -> Optional[str]:
     """Диспетчеризация MCP Hub: аргументы приходят без обёртки {"tool": ...}."""
     has_ticket = "ticket_id" in params
@@ -406,6 +481,20 @@ def handle_request(event: Any, *, as_http: bool = False) -> Any:
                 print(f"OFF_TOPIC text_len={len(text)}")
 
             result = append_message(ticket_id=ticket_id, user_id=user_id, text=text, role=role)
+
+        elif action == "record-usage":
+            ticket_id = params.get("ticket_id")
+            if not ticket_id:
+                error = {"error": "Missing ticket_id for record-usage"}
+                return _http_response(400, error) if as_http else error
+            result = record_usage(
+                ticket_id=ticket_id,
+                message_id=params.get("message_id"),
+                tokens_in=params.get("tokens_in"),
+                tokens_out=params.get("tokens_out"),
+                latency_ms=params.get("latency_ms"),
+                model=params.get("model"),
+            )
 
         else:
             error = {"error": f"Unknown action: {action}"}
